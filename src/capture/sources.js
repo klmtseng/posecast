@@ -16,8 +16,10 @@ export async function openWebcam(videoEl, facingMode = 'user') {
   };
 }
 
+// file 可為 File 物件或 URL 字串
 export async function openVideoFile(videoEl, file) {
-  const url = URL.createObjectURL(file);
+  const isFile = file instanceof File;
+  const url = isFile ? URL.createObjectURL(file) : file;
   videoEl.srcObject = null;
   videoEl.src = url;
   videoEl.loop = true;
@@ -27,7 +29,7 @@ export async function openVideoFile(videoEl, file) {
     type: 'video',
     element: videoEl,
     get size() { return { width: videoEl.videoWidth, height: videoEl.videoHeight }; },
-    stop() { videoEl.pause(); videoEl.removeAttribute('src'); URL.revokeObjectURL(url); },
+    stop() { videoEl.pause(); videoEl.removeAttribute('src'); if (isFile) URL.revokeObjectURL(url); },
   };
 }
 

@@ -14,6 +14,12 @@ const fileVideo = document.getElementById('file-video');
 
 let customVrmFile = null;
 let session = null; // { stage, vrm, mode, hud }
+let demoVideo = null; // ?demo=video 時自動用測試影片啟動全身模式
+
+if (new URLSearchParams(location.search).get('demo') === 'video') {
+  demoVideo = '/test-assets/pose-video.mp4';
+  queueMicrotask(() => start('full'));
+}
 
 // ===== 模式選擇畫面 =====
 document.querySelectorAll('.card').forEach((card) => {
@@ -87,9 +93,11 @@ async function start(modeName) {
         if (filePhoto.files[0]) { await mode.processFile(filePhoto.files[0]); filePhoto.value = ''; }
       };
     } else {
-      mode = await createLiveMode({ kind: modeName, quality, retargeter, hud, videoEl });
+      const overlayEl = document.getElementById('overlay');
+      mode = await createLiveMode({ kind: modeName, quality, retargeter, hud, videoEl, overlayEl });
       hud.setControls([
         { label: '🔄 切換鏡頭', onClick: () => mode.useCamera(mode.facingMode === 'user' ? 'environment' : 'user') },
+        { label: '🦴 骨架線', onClick: () => mode.toggleOverlay() },
         { label: '🎬 選擇影片', onClick: () => fileVideo.click() },
         { label: '📹 使用鏡頭', primary: true, onClick: () => mode.useCamera('user') },
         { label: '← 返回', onClick: backToMenu },
@@ -97,8 +105,13 @@ async function start(modeName) {
       fileVideo.onchange = async () => {
         if (fileVideo.files[0]) { await mode.useVideo(fileVideo.files[0]); fileVideo.value = ''; }
       };
-      // 預設嘗試開鏡頭;失敗會提示改用影片
-      await mode.useCamera('user');
+      if (demoVideo) {
+        await mode.useVideo(demoVideo);   // ?demo=video:無鏡頭環境的演示/驗收路徑
+        demoVideo = null;
+      } else {
+        // 預設嘗試開鏡頭;失敗會提示改用影片
+        await mode.useCamera('user');
+      }
     }
 
     session = { stage, vrm, mode, hud, retargeter };
@@ -189,9 +202,12 @@ if (new URLSearchParams(location.search).has('smoke')) {
 
       // 影片路徑驗證(M3):逐幀 detectForVideo 5 秒,統計偵測率與 FPS
       const videoDetector = await createPoseDetector({ quality: 'lite', mode: 'VIDEO' });
+      const { createOverlay } = await import('./ui/overlay.js');
       const v = document.getElementById('preview');
+      const overlay = createOverlay(document.getElementById('overlay'), v);
       v.src = '/test-assets/pose-video.mp4';
       v.loop = true; v.muted = true;
+      v.style.display = 'block';
       await v.play();
       let frames = 0, hits = 0, lastT = -1;
       const t0 = performance.now();
@@ -202,6 +218,7 @@ if (new URLSearchParams(location.search).has('smoke')) {
         const r = videoDetector.detectForVideo(v, performance.now());
         const vrig = solvePose(r, { width: v.videoWidth, height: v.videoHeight });
         if (vrig) { hits++; rt.applyPose(vrig); }
+        overlay.draw(r, null);
         vrm.update(d);
       };
       await new Promise((r) => setTimeout(r, 5000));
@@ -210,6 +227,13 @@ if (new URLSearchParams(location.search).has('smoke')) {
       videoDetector.close();
       step('影片逐幀動捕', hits > 20 && hits / frames > 0.9,
         `${frames} frames, ${hits} detections, ${(frames / secs).toFixed(1)} det-fps`);
+
+      // overlay 有真的畫出骨架像素
+      const oc = document.getElementById('overlay');
+      const px = oc.getContext('2d').getImageData(0, 0, oc.width, oc.height).data;
+      let drawn = 0;
+      for (let i = 3; i < px.length; i += 4) if (px[i] > 0) drawn++;
+      step('骨架疊加層繪製', drawn > 100, `${drawn} px drawn on ${oc.width}x${oc.height}`);
 
       report.ok = report.steps.every((s) => s.ok);
     } catch (e) {

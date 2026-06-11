@@ -1,11 +1,13 @@
 import { createPoseDetector, createFaceDetector } from '../capture/detector.js';
 import { solvePose, solveFace } from '../avatar/retarget.js';
 import { openWebcam, openVideoFile } from '../capture/sources.js';
+import { createOverlay } from '../ui/overlay.js';
 
 // 即時模式共用核心:upper(臉+上半身)與 full(全身)只差在偵測器組合與套用範圍
-export async function createLiveMode({ kind, quality, retargeter, hud, videoEl }) {
+export async function createLiveMode({ kind, quality, retargeter, hud, videoEl, overlayEl }) {
   const useFace = kind === 'upper';
   const useLegs = kind === 'full';
+  const overlay = overlayEl ? createOverlay(overlayEl, videoEl) : null;
 
   hud.setStatus('載入偵測模型…');
   const pose = await createPoseDetector({ quality, mode: 'VIDEO' });
@@ -55,11 +57,14 @@ export async function createLiveMode({ kind, quality, retargeter, hud, videoEl }
       hud.tickDetect(false);
     }
 
+    let faceResult = null;
     if (face) {
-      const faceResult = face.detectForVideo(v, ts + 0.001);
+      faceResult = face.detectForVideo(v, ts + 0.001);
       const faceRig = solveFace(faceResult, source.size);
       if (faceRig) retargeter.applyFace(faceRig);
     }
+
+    overlay?.draw(poseResult, faceResult);
   }
 
   return {
@@ -67,11 +72,13 @@ export async function createLiveMode({ kind, quality, retargeter, hud, videoEl }
     useCamera,
     useVideo,
     get facingMode() { return source?.facingMode; },
+    toggleOverlay: () => overlay?.toggle(),
     onFrame,
     stop() {
       active = false;
       source?.stop();
       videoEl.style.display = 'none';
+      overlay?.hide();
       pose.close();
       face?.close();
     },
