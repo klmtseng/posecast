@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import * as Kalidokit from 'kalidokit';
+import { BoneStabilizer } from '../capture/smoothing.js';
 
 const { clamp } = Kalidokit.Utils;
 const { lerp } = Kalidokit.Vector;
@@ -11,26 +12,70 @@ const FLIP_Z = -1;
 
 const tmpEuler = new THREE.Euler();
 const tmpQuat = new THREE.Quaternion();
+const IDENTITY = new THREE.Quaternion();
+
+// 信心度閘門失效時要回歸自然姿勢的肢段 → 骨骼對應
+const LIMB_BONES = {
+  leftArm: ['leftUpperArm', 'leftLowerArm', 'leftHand'],
+  rightArm: ['rightUpperArm', 'rightLowerArm', 'rightHand'],
+  leftLeg: ['leftUpperLeg', 'leftLowerLeg'],
+  rightLeg: ['rightUpperLeg', 'rightLowerLeg'],
+};
+
+// Kalidokit 手指鍵名(VRM0 命名)→ VRM1 humanoid 骨骼名
+const FINGER_MAP = [
+  ['ThumbProximal', 'ThumbMetacarpal'], ['ThumbIntermediate', 'ThumbProximal'], ['ThumbDistal', 'ThumbDistal'],
+  ['IndexProximal', 'IndexProximal'], ['IndexIntermediate', 'IndexIntermediate'], ['IndexDistal', 'IndexDistal'],
+  ['MiddleProximal', 'MiddleProximal'], ['MiddleIntermediate', 'MiddleIntermediate'], ['MiddleDistal', 'MiddleDistal'],
+  ['RingProximal', 'RingProximal'], ['RingIntermediate', 'RingIntermediate'], ['RingDistal', 'RingDistal'],
+  ['LittleProximal', 'LittleProximal'], ['LittleIntermediate', 'LittleIntermediate'], ['LittleDistal', 'LittleDistal'],
+];
 
 export class Retargeter {
   constructor(vrm) {
     this.vrm = vrm;
     this.lookTarget = new THREE.Euler();
+    this.stabilizers = new Map(); // 骨骼名 → BoneStabilizer
+    const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+    this.hipsRest = hips ? hips.position.clone() : new THREE.Vector3(0, 1, 0);
   }
 
-  // 單一骨骼旋轉(帶阻尼與插值);name 用 VRM1 humanoid 名稱
+  _stab(name) {
+    let s = this.stabilizers.get(name);
+    if (!s) { s = new BoneStabilizer(); this.stabilizers.set(name, s); }
+    return s;
+  }
+
+  // 單一骨骼旋轉:死區+離群剔除+One-Euro 穩定後,以阻尼與插值套用
   rotateBone(name, rotation, dampener = 1, lerpAmount = 0.3) {
     if (!rotation) return;
     const node = this.vrm.humanoid?.getNormalizedBoneNode(name);
     if (!node) return;
+    const r = this._stab(name).process(rotation, performance.now() / 1000);
     tmpEuler.set(
-      rotation.x * dampener * FLIP_X,
-      rotation.y * dampener,
-      rotation.z * dampener * FLIP_Z,
-      rotation.rotationOrder || 'XYZ'
+      r.x * dampener * FLIP_X,
+      r.y * dampener,
+      r.z * dampener * FLIP_Z,
+      r.rotationOrder || 'XYZ'
     );
     tmpQuat.setFromEuler(tmpEuler);
     node.quaternion.slerp(tmpQuat, lerpAmount);
+  }
+
+  // 閘門失效/目標消失時:緩慢回歸自然姿勢,並重置濾波器避免重新捕捉時殘留舊狀態
+  decayBone(name, amount = 0.07) {
+    const node = this.vrm.humanoid?.getNormalizedBoneNode(name);
+    if (!node) return;
+    node.quaternion.slerp(IDENTITY, amount);
+    this.stabilizers.get(name)?.reset();
+  }
+
+  decayAll(amount = 0.05) {
+    for (const name of Object.keys(this.vrm.humanoid?.humanBones || {})) {
+      this.decayBone(name, amount);
+    }
+    const hips = this.vrm.humanoid?.getNormalizedBoneNode('hips');
+    if (hips) hips.position.lerp(this.hipsRest, amount);
   }
 
   positionHips(position, dampener = 1, lerpAmount = 0.07) {
@@ -46,7 +91,8 @@ export class Retargeter {
   }
 
   // riggedPose: Kalidokit.Pose.solve 結果
-  applyPose(riggedPose, { legs = true, hips = true } = {}) {
+  // gates: 各肢段信心度閘門 {leftArm, rightArm, leftLeg, rightLeg},false = 該肢段回歸自然垂放
+  applyPose(riggedPose, { legs = true, hips = true, gates = {} } = {}) {
     if (!riggedPose) return;
     if (hips) {
       this.rotateBone('hips', riggedPose.Hips.rotation, 0.7);
@@ -55,18 +101,45 @@ export class Retargeter {
     this.rotateBone('chest', riggedPose.Spine, 0.25, 0.3);
     this.rotateBone('spine', riggedPose.Spine, 0.45, 0.3);
 
-    this.rotateBone('rightUpperArm', riggedPose.RightUpperArm, 1, 0.3);
-    this.rotateBone('rightLowerArm', riggedPose.RightLowerArm, 1, 0.3);
-    this.rotateBone('leftUpperArm', riggedPose.LeftUpperArm, 1, 0.3);
-    this.rotateBone('leftLowerArm', riggedPose.LeftLowerArm, 1, 0.3);
-    this.rotateBone('rightHand', riggedPose.RightHand, 1, 0.3);
-    this.rotateBone('leftHand', riggedPose.LeftHand, 1, 0.3);
-
+    const limb = (key, apply) => {
+      if (gates[key] === false) LIMB_BONES[key].forEach((b) => this.decayBone(b));
+      else apply();
+    };
+    limb('rightArm', () => {
+      this.rotateBone('rightUpperArm', riggedPose.RightUpperArm, 1, 0.3);
+      this.rotateBone('rightLowerArm', riggedPose.RightLowerArm, 1, 0.3);
+      this.rotateBone('rightHand', riggedPose.RightHand, 1, 0.3);
+    });
+    limb('leftArm', () => {
+      this.rotateBone('leftUpperArm', riggedPose.LeftUpperArm, 1, 0.3);
+      this.rotateBone('leftLowerArm', riggedPose.LeftLowerArm, 1, 0.3);
+      this.rotateBone('leftHand', riggedPose.LeftHand, 1, 0.3);
+    });
     if (legs) {
-      this.rotateBone('rightUpperLeg', riggedPose.RightUpperLeg, 1, 0.3);
-      this.rotateBone('rightLowerLeg', riggedPose.RightLowerLeg, 1, 0.3);
-      this.rotateBone('leftUpperLeg', riggedPose.LeftUpperLeg, 1, 0.3);
-      this.rotateBone('leftLowerLeg', riggedPose.LeftLowerLeg, 1, 0.3);
+      limb('rightLeg', () => {
+        this.rotateBone('rightUpperLeg', riggedPose.RightUpperLeg, 1, 0.3);
+        this.rotateBone('rightLowerLeg', riggedPose.RightLowerLeg, 1, 0.3);
+      });
+      limb('leftLeg', () => {
+        this.rotateBone('leftUpperLeg', riggedPose.LeftUpperLeg, 1, 0.3);
+        this.rotateBone('leftLowerLeg', riggedPose.LeftLowerLeg, 1, 0.3);
+      });
+    }
+  }
+
+  // riggedHand: Kalidokit.Hand.solve 結果;side: 'Left' | 'Right'
+  // poseRig 提供手腕 z 軸(來自全身姿態),與手部偵測的 x/y 合成(Kalidokit 官方建議作法)
+  applyHand(side, riggedHand, poseRig = null) {
+    const lc = side.toLowerCase();
+    if (!riggedHand) {
+      for (const [, vrmSuffix] of FINGER_MAP) this.decayBone(lc + vrmSuffix, 0.1);
+      return;
+    }
+    const wrist = riggedHand[`${side}Wrist`];
+    const poseHand = poseRig?.[`${side}Hand`];
+    this.rotateBone(`${lc}Hand`, { x: wrist.x, y: wrist.y, z: poseHand?.z ?? wrist.z }, 1, 0.4);
+    for (const [kSuffix, vrmSuffix] of FINGER_MAP) {
+      this.rotateBone(lc + vrmSuffix, riggedHand[side + kSuffix], 1, 0.4);
     }
   }
 
@@ -112,7 +185,8 @@ export class Retargeter {
   }
 }
 
-// MediaPipe Tasks Vision 結果 → Kalidokit 求解
+// ===== MediaPipe Tasks Vision 結果 → Kalidokit 求解 =====
+
 export function solvePose(poseResult, sourceSize) {
   const lm = poseResult?.landmarks?.[0];
   const world = poseResult?.worldLandmarks?.[0];
@@ -132,4 +206,36 @@ export function solveFace(faceResult, sourceSize) {
     imageSize: sourceSize,
     smoothBlink: false,
   });
+}
+
+// 回傳 { Left: rig|null, Right: rig|null }
+export function solveHands(handResult) {
+  const out = { Left: null, Right: null };
+  const lms = handResult?.landmarks || [];
+  for (let i = 0; i < lms.length; i++) {
+    const side = handResult.handedness?.[i]?.[0]?.categoryName;
+    if (side !== 'Left' && side !== 'Right') continue;
+    out[side] = Kalidokit.Hand.solve(lms[i], side);
+  }
+  return out;
+}
+
+// 各肢段平均 visibility → 閘門(MediaPipe 索引:肩11/12 肘13/14 腕15/16 髖23/24 膝25/26 踝27/28)
+const LIMB_LANDMARKS = {
+  leftArm: [11, 13, 15],
+  rightArm: [12, 14, 16],
+  leftLeg: [23, 25, 27],
+  rightLeg: [24, 26, 28],
+};
+const GATE_THRESHOLD = 0.55;
+
+export function computeGates(poseResult) {
+  const lm = poseResult?.landmarks?.[0];
+  const gates = {};
+  if (!lm) return gates;
+  for (const [limbName, idxs] of Object.entries(LIMB_LANDMARKS)) {
+    const avg = idxs.reduce((s, i) => s + (lm[i]?.visibility ?? 0), 0) / idxs.length;
+    gates[limbName] = avg >= GATE_THRESHOLD;
+  }
+  return gates;
 }

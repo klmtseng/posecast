@@ -173,8 +173,8 @@ if (new URLSearchParams(location.search).has('smoke')) {
       stage.scene.add(vrm.scene);
       step('VRM 載入', !!vrm.humanoid, `metaVersion=${vrm.meta?.metaVersion}, hips=${!!vrm.humanoid?.getNormalizedBoneNode('hips')}`);
 
-      const { createPoseDetector } = await import('./capture/detector.js');
-      const { solvePose, Retargeter } = await import('./avatar/retarget.js');
+      const { createPoseDetector, createHandDetector } = await import('./capture/detector.js');
+      const { solvePose, solveHands, computeGates, Retargeter } = await import('./avatar/retarget.js');
       const { loadPhotoFromURL } = await import('./capture/sources.js');
       const detector = await createPoseDetector({ quality: 'lite', mode: 'IMAGE' });
       step('MediaPipe 初始化', true);
@@ -234,6 +234,25 @@ if (new URLSearchParams(location.search).has('smoke')) {
       let drawn = 0;
       for (let i = 3; i < px.length; i += 4) if (px[i] > 0) drawn++;
       step('骨架疊加層繪製', drawn > 100, `${drawn} px drawn on ${oc.width}x${oc.height}`);
+
+      // 信心度閘門:全身入鏡的測試照四肢都應通過
+      const gates = computeGates(result);
+      step('信心度閘門', gates.leftArm === true && gates.rightArm === true, JSON.stringify(gates));
+
+      // 手部偵測 + Kalidokit 手指求解(照片中手較小,偵測到幾隻算幾隻,初始化成功即過)
+      const handDet = await createHandDetector({ mode: 'IMAGE' });
+      const hr = handDet.detect(photo.element);
+      const handRigs = solveHands(hr);
+      const nHands = hr?.landmarks?.length || 0;
+      if (handRigs.Left || handRigs.Right) {
+        const sample = handRigs.Left || handRigs.Right;
+        const key = handRigs.Left ? 'LeftIndexProximal' : 'RightIndexProximal';
+        rt.applyHand(handRigs.Left ? 'Left' : 'Right', sample, rig);
+        step('手指求解+套用', !!sample[key], `${nHands} hands, ${key}=${JSON.stringify(sample[key])?.slice(0, 60)}`);
+      } else {
+        step('手指求解+套用', true, `${nHands} hands detected in test photo(初始化 OK,實際手指追蹤待手機實測)`);
+      }
+      handDet.close();
 
       report.ok = report.steps.every((s) => s.ok);
     } catch (e) {

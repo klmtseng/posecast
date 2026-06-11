@@ -1,4 +1,4 @@
-import { FilesetResolver, PoseLandmarker, FaceLandmarker } from '@mediapipe/tasks-vision';
+import { FilesetResolver, PoseLandmarker, FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
 
 let fileset = null;
 async function getFileset() {
@@ -36,6 +36,18 @@ export async function createFaceDetector({ mode = 'VIDEO' } = {}) {
       baseOptions: { modelAssetPath: '/models/face_landmarker.task', delegate: base.delegate },
       runningMode: mode,
       numFaces: 1,
+    }),
+    {}
+  );
+}
+
+export async function createHandDetector({ mode = 'VIDEO' } = {}) {
+  const fs = await getFileset();
+  return createWithFallback(
+    (base) => HandLandmarker.createFromOptions(fs, {
+      baseOptions: { modelAssetPath: '/models/hand_landmarker.task', delegate: base.delegate },
+      runningMode: mode,
+      numHands: 2,
     }),
     {}
   );

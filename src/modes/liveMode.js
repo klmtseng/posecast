@@ -1,21 +1,27 @@
-import { createPoseDetector, createFaceDetector } from '../capture/detector.js';
-import { solvePose, solveFace } from '../avatar/retarget.js';
+import { createPoseDetector, createFaceDetector, createHandDetector } from '../capture/detector.js';
+import { solvePose, solveFace, solveHands, computeGates } from '../avatar/retarget.js';
 import { openWebcam, openVideoFile } from '../capture/sources.js';
 import { createOverlay } from '../ui/overlay.js';
 
-// 即時模式共用核心:upper(臉+上半身)與 full(全身)只差在偵測器組合與套用範圍
+// 目標完全消失超過此偵測幀數後,整體緩慢回歸自然站姿
+const LOST_FRAMES_BEFORE_DECAY = 20;
+
+// 即時模式共用核心:upper(臉+上半身+手指)與 full(全身)只差在偵測器組合與套用範圍
 export async function createLiveMode({ kind, quality, retargeter, hud, videoEl, overlayEl }) {
   const useFace = kind === 'upper';
+  const useHands = kind === 'upper';
   const useLegs = kind === 'full';
   const overlay = overlayEl ? createOverlay(overlayEl, videoEl) : null;
 
   hud.setStatus('載入偵測模型…');
   const pose = await createPoseDetector({ quality, mode: 'VIDEO' });
   const face = useFace ? await createFaceDetector({ mode: 'VIDEO' }) : null;
+  const hands = useHands ? await createHandDetector({ mode: 'VIDEO' }) : null;
 
   let source = null;
   let active = true;
   let lastVideoTime = -1;
+  let lostFrames = 0;
 
   async function useCamera(facingMode = 'user') {
     source?.stop();
@@ -51,9 +57,14 @@ export async function createLiveMode({ kind, quality, retargeter, hud, videoEl, 
     const poseResult = pose.detectForVideo(v, ts);
     const rig = solvePose(poseResult, source.size);
     if (rig) {
-      retargeter.applyPose(rig, { legs: useLegs, hips: useLegs });
+      lostFrames = 0;
+      // 信心度閘門:出鏡/被遮擋的肢段回歸自然垂放,而不是吃雜訊抖動
+      const gates = computeGates(poseResult);
+      retargeter.applyPose(rig, { legs: useLegs, hips: useLegs, gates });
       hud.tickDetect(true);
     } else {
+      // 整個人消失:先凍結一小段,再整體回歸自然站姿
+      if (++lostFrames > LOST_FRAMES_BEFORE_DECAY) retargeter.decayAll();
       hud.tickDetect(false);
     }
 
@@ -64,7 +75,15 @@ export async function createLiveMode({ kind, quality, retargeter, hud, videoEl, 
       if (faceRig) retargeter.applyFace(faceRig);
     }
 
-    overlay?.draw(poseResult, faceResult);
+    let handResult = null;
+    if (hands) {
+      handResult = hands.detectForVideo(v, ts + 0.002);
+      const handRigs = solveHands(handResult);
+      retargeter.applyHand('Left', handRigs.Left, rig);
+      retargeter.applyHand('Right', handRigs.Right, rig);
+    }
+
+    overlay?.draw(poseResult, faceResult, handResult);
   }
 
   return {
@@ -81,6 +100,7 @@ export async function createLiveMode({ kind, quality, retargeter, hud, videoEl, 
       overlay?.hide();
       pose.close();
       face?.close();
+      hands?.close();
     },
   };
 }
