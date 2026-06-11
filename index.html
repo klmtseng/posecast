@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>PoseCast — 骨架動捕 × VRM 角色</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0d0f14; color: #e8eaf0;
+      font-family: -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
+
+    /* ===== 模式選擇畫面 ===== */
+    #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 18px; padding: 24px; z-index: 30; background: radial-gradient(ellipse at 50% 30%, #1a2032 0%, #0d0f14 70%); overflow-y: auto; }
+    #menu h1 { font-size: 28px; letter-spacing: 2px; }
+    #menu .sub { color: #8a93a8; font-size: 13px; margin-bottom: 6px; text-align: center; }
+    .cards { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 420px; }
+    .card { background: #161b28; border: 1px solid #2a3350; border-radius: 14px; padding: 16px 18px;
+      cursor: pointer; transition: border-color .15s, transform .15s; text-align: left; color: inherit; width: 100%; }
+    .card:active { transform: scale(.98); }
+    .card:hover { border-color: #5b8cff; }
+    .card .t { font-size: 17px; font-weight: 700; }
+    .card .d { font-size: 12.5px; color: #8a93a8; margin-top: 4px; line-height: 1.5; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    .row label { font-size: 13px; color: #8a93a8; }
+    select, .btn-sm { background: #161b28; color: #e8eaf0; border: 1px solid #2a3350; border-radius: 8px;
+      padding: 7px 12px; font-size: 13px; }
+    #vrm-status { font-size: 12px; color: #6fc28a; }
+
+    /* ===== 執行畫面 ===== */
+    #app { position: fixed; inset: 0; display: none; }
+    #app canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #preview { position: fixed; right: 10px; top: 10px; width: 28vw; max-width: 220px; border-radius: 10px;
+      border: 1px solid #2a3350; z-index: 12; background: #000; display: none; transform: scaleX(-1); }
+    #preview.rear { transform: none; }
+
+    #hud { position: fixed; left: 10px; top: 10px; z-index: 12; font-size: 12px; line-height: 1.7;
+      background: rgba(13,15,20,.65); border: 1px solid #2a3350; border-radius: 10px; padding: 8px 12px;
+      backdrop-filter: blur(4px); pointer-events: none; }
+    #hud .ok { color: #6fc28a; } #hud .warn { color: #e8b35a; }
+
+    #controls { position: fixed; bottom: calc(12px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
+      display: flex; gap: 10px; z-index: 12; flex-wrap: wrap; justify-content: center; max-width: 96vw; }
+    .ctl { background: rgba(22,27,40,.85); color: #e8eaf0; border: 1px solid #2a3350; border-radius: 999px;
+      padding: 10px 16px; font-size: 14px; cursor: pointer; backdrop-filter: blur(4px); }
+    .ctl:active { transform: scale(.95); }
+    .ctl.primary { background: #2d57d6; border-color: #2d57d6; }
+
+    #drop-hint { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      background: rgba(45,87,214,.25); border: 3px dashed #5b8cff; z-index: 40; font-size: 20px; pointer-events: none; }
+    #loading { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      flex-direction: column; gap: 12px; background: rgba(13,15,20,.85); z-index: 50; }
+    .spin { width: 36px; height: 36px; border: 3px solid #2a3350; border-top-color: #5b8cff; border-radius: 50%;
+      animation: spin 0.9s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <!-- 模式選擇 -->
+  <div id="menu">
+    <h1>🎭 PoseCast</h1>
+    <div class="sub">骨架辨識 × VRM 虛擬角色動捕<br>選擇這次要啟動的模式</div>
+    <div class="cards">
+      <button class="card" data-mode="photo">
+        <div class="t">📷 照片姿勢</div>
+        <div class="d">上傳或拍一張人物照片,角色擺出相同姿勢。可匯出截圖與姿勢 JSON。</div>
+      </button>
+      <button class="card" data-mode="upper">
+        <div class="t">🎭 臉部 + 上半身(VTuber)</div>
+        <div class="d">鏡頭即時同步表情、眨眼、嘴型與頭肩手動作,坐著直播最自然。</div>
+      </button>
+      <button class="card" data-mode="full">
+        <div class="t">🏃 全身動捕</div>
+        <div class="d">33 點全身骨架即時追蹤,整個人的動作角色都跟著做。</div>
+      </button>
+    </div>
+    <div class="row">
+      <label>偵測品質</label>
+      <select id="quality">
+        <option value="lite" selected>低(流暢優先)</option>
+        <option value="full">高(精準優先)</option>
+      </select>
+      <button class="btn-sm" id="pick-vrm">載入自己的 VRM…</button>
+    </div>
+    <div id="vrm-status">使用內建範例角色(可拖放 .vrm 檔替換)</div>
+  </div>
+
+  <!-- 執行畫面 -->
+  <div id="app">
+    <video id="preview" autoplay muted playsinline></video>
+    <div id="hud"></div>
+    <div id="controls"></div>
+  </div>
+
+  <div id="drop-hint">放開以載入 .vrm 角色</div>
+  <div id="loading"><div class="spin"></div><div id="loading-text">載入中…</div></div>
+
+  <input type="file" id="file-vrm" accept=".vrm" />
+  <input type="file" id="file-photo" accept="image/*" capture="environment" />
+  <input type="file" id="file-video" accept="video/*" />
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
