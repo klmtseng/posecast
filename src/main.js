@@ -95,13 +95,53 @@ async function start(modeName) {
     } else {
       const overlayEl = document.getElementById('overlay');
       mode = await createLiveMode({ kind: modeName, quality, retargeter, hud, videoEl, overlayEl });
-      hud.setControls([
+
+      // ===== 錄製 → 匯出(JSON / BVH / GLB) =====
+      let recorder = null;
+      const setLiveControls = () => hud.setControls([
+        recorder?.recording
+          ? { label: '⏹ 停止錄製', primary: true, onClick: stopRecording }
+          : { label: '⏺ 錄製', onClick: startRecording },
         { label: '🔄 切換鏡頭', onClick: () => mode.useCamera(mode.facingMode === 'user' ? 'environment' : 'user') },
         { label: '🦴 骨架線', onClick: () => mode.toggleOverlay() },
         { label: '🎬 選擇影片', onClick: () => fileVideo.click() },
-        { label: '📹 使用鏡頭', primary: true, onClick: () => mode.useCamera('user') },
+        { label: '📹 使用鏡頭', onClick: () => mode.useCamera('user') },
         { label: '← 返回', onClick: backToMenu },
       ]);
+      async function startRecording() {
+        const { createRecorder } = await import('./export/recorder.js');
+        recorder = createRecorder(vrm);
+        session.recorder = recorder;
+        setLiveControls();
+        hud.setStatus('⏺ 錄製中…(完成後可匯出 JSON / BVH / GLB)');
+      }
+      function stopRecording() {
+        recorder.stop();
+        hud.setStatus(`⏹ 已錄 ${recorder.frameCount} 幀 / ${recorder.duration.toFixed(1)} 秒,選擇匯出格式`);
+        const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
+        hud.setControls([
+          { label: '💾 動作 JSON', primary: true, onClick: async () => {
+              const { exportMotionJSON } = await import('./export/exporters.js');
+              download(URL.createObjectURL(exportMotionJSON(recorder)), `posecast_${stamp()}.json`);
+            } },
+          { label: '🦴 BVH', onClick: async () => {
+              const { exportBVH } = await import('./export/exporters.js');
+              download(URL.createObjectURL(exportBVH(recorder, vrm)), `posecast_${stamp()}.bvh`);
+            } },
+          { label: '📦 GLB(含模型)', onClick: async () => {
+              hud.setStatus('打包 GLB 中…');
+              const { exportGLB } = await import('./export/exporters.js');
+              try {
+                const blob = await exportGLB(recorder, vrm);
+                download(URL.createObjectURL(blob), `posecast_${stamp()}.glb`);
+                hud.setStatus(`✅ GLB 已匯出(${(blob.size / 1048576).toFixed(1)} MB)`);
+              } catch (e) { hud.setStatus(`⚠️ GLB 匯出失敗:${e.message}`, 'warn'); }
+            } },
+          { label: '🗑 捨棄', onClick: () => { recorder = null; session.recorder = null; setLiveControls(); hud.setStatus('已捨棄錄製'); } },
+        ]);
+      }
+      setLiveControls();
+
       fileVideo.onchange = async () => {
         if (fileVideo.files[0]) { await mode.useVideo(fileVideo.files[0]); fileVideo.value = ''; }
       };
@@ -114,10 +154,11 @@ async function start(modeName) {
       }
     }
 
-    session = { stage, vrm, mode, hud, retargeter };
+    session = { stage, vrm, mode, hud, retargeter, recorder: null };
     stage.onFrame = (delta) => {
       mode.onFrame(delta);
       vrm.update(delta);
+      session?.recorder?.capture();
       hud.tickFrame();
     };
   } catch (e) {
@@ -209,6 +250,8 @@ if (new URLSearchParams(location.search).has('smoke')) {
       v.loop = true; v.muted = true;
       v.style.display = 'block';
       await v.play();
+      const { createRecorder } = await import('./export/recorder.js');
+      const rec = createRecorder(vrm);
       let frames = 0, hits = 0, lastT = -1;
       const t0 = performance.now();
       stage.onFrame = (d) => {
@@ -220,9 +263,11 @@ if (new URLSearchParams(location.search).has('smoke')) {
         if (vrig) { hits++; rt.applyPose(vrig); }
         overlay.draw(r, null);
         vrm.update(d);
+        rec.capture();
       };
       await new Promise((r) => setTimeout(r, 5000));
       stage.onFrame = null;
+      rec.stop();
       const secs = (performance.now() - t0) / 1000;
       videoDetector.close();
       step('影片逐幀動捕', hits > 20 && hits / frames > 0.9,
@@ -238,6 +283,30 @@ if (new URLSearchParams(location.search).has('smoke')) {
       // 信心度閘門:全身入鏡的測試照四肢都應通過
       const gates = computeGates(result);
       step('信心度閘門', gates.leftArm === true && gates.rightArm === true, JSON.stringify(gates));
+
+      // 錄製器 + 三種匯出格式驗證
+      step('動作錄製', rec.frameCount > 30, `${rec.frameCount} frames / ${rec.duration.toFixed(1)}s`);
+      const { exportMotionJSON, exportBVH, exportGLB } = await import('./export/exporters.js');
+      const jsonBlob = exportMotionJSON(rec);
+      const jd = JSON.parse(await jsonBlob.text());
+      step('JSON 匯出', jd.format === 'posecast-anim@1' && jd.tracks.length > 10 && jd.times.length > 60,
+        `${jd.tracks.length} tracks, ${jd.times.length} keys @${jd.fps}fps`);
+      const bvhText = await exportBVH(rec, vrm).text();
+      const bvhFrames = parseInt(bvhText.match(/Frames: (\d+)/)?.[1] || 0, 10);
+      step('BVH 匯出', bvhText.startsWith('HIERARCHY') && bvhText.includes('ROOT hips') && bvhFrames > 60,
+        `${(bvhText.length / 1024).toFixed(0)} KB, ${bvhFrames} frames, joints=${(bvhText.match(/JOINT /g) || []).length + 1}`);
+      const glbBlob = await exportGLB(rec, vrm);
+      const magic = new TextDecoder().decode((await glbBlob.arrayBuffer()).slice(0, 4));
+      step('GLB 匯出', magic === 'glTF' && glbBlob.size > 1048576,
+        `magic=${magic}, ${(glbBlob.size / 1048576).toFixed(1)} MB(模型+動畫)`);
+      // 回傳實檔給本機做 Blender 匯入驗證
+      await beacon('bvh', { text: bvhText });
+      const glbB64 = await new Promise((res) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result.split(',')[1]);
+        fr.readAsDataURL(glbBlob);
+      });
+      await beacon('glb', { b64: glbB64 });
 
       // 手部偵測 + Kalidokit 手指求解(照片中手較小,偵測到幾隻算幾隻,初始化成功即過)
       const handDet = await createHandDetector({ mode: 'IMAGE' });
