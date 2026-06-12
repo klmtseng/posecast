@@ -34,6 +34,18 @@ HTTPS=1 npm run dev  # 區網手機實測用(getUserMedia 需要 HTTPS)
 
 煙霧測試:開 `/?smoke=1`,自動驗證 WebGL → VRM → MediaPipe → Kalidokit → 重定向 → 影片逐幀動捕,結果寫入 `document.title`(SMOKE_OK / SMOKE_FAIL)並 POST 到 `localhost:8787`。
 
+## 動作錄製與匯出(遊戲引擎管線)
+
+即時模式按「⏺ 錄製」,停止後可匯出三種格式(皆 30fps、離線零相位平滑):
+
+| 格式 | 空間 | 用途 |
+|---|---|---|
+| 動作 JSON(`posecast-anim@1`) | VRM normalized | three.js 遊戲直接重建 `AnimationClip` 播放(檔內附 usage 說明) |
+| BVH | VRM humanoid 階層,cm,Y-up,ZXY | Blender / Unity / Unreal / Godot 通用動捕格式,retarget 到任何角色 |
+| GLB | raw 骨骼 + 模型打包 | 任何引擎開箱即播(模型+動畫一包帶走) |
+
+驗證:Blender 匯入 BVH(54 bones/125 frames)與 GLB(armature+meshes+219 fcurves)實測通過。
+
 ## 自訂角色
 
 用 [VRoid Studio](https://vroid.com/studio) 免費捏角色,匯出 `.vrm` 後拖放進頁面即可(支援 VRM 0.x / 1.0)。
